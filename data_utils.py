@@ -9,6 +9,15 @@ import albumentations as A
 import random
 
 
+def get_transform(transform_list):
+    transCompose=[]
+    if 'ToTensor' in transform_list:
+        transCompose.append(transforms.ToTensor())
+    if 'Normalize' in transform_list:
+        transCompose.append(transforms.Normalize((0.5, 0.5, 0.5),(0.5, 0.5, 0.5)))
+    return transforms.Compose(transCompose)
+
+
 class LoadDatasetFromFolder(Dataset):
     def __init__(self, cfg):
         time1_path = cfg.DATAPATH_TIME1
