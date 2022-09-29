@@ -240,21 +240,21 @@ class FCCDN(torch.nn.Module):
         return [y, y1, y2]
     
     def initialize_weights(self):
-    for m in self.modules():
-        #判断是否属于Conv2d
-        if isinstance(m, nn.Conv2d):
-            nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+        for m in self.modules():
+            #判断是否属于Conv2d
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
 
-            # 判断是否有偏置
-            if m.bias is not None:
-                torch.nn.init.constant_(m.bias.data, 0.3)
-        elif isinstance(m, nn.Linear):
-            torch.nn.init.normal_(m.weight.data, 0.1)
-            if m.bias is not None:
-                torch.nn.init.zeros_(m.bias.data)
-        elif isinstance(m, nn.BatchNorm2d):
-            m.weight.data.fill_(1)
-            m.bias.data.zero_()
+                # 判断是否有偏置
+                if m.bias is not None:
+                    torch.nn.init.constant_(m.bias.data, 0.3)
+            elif isinstance(m, nn.Linear):
+                torch.nn.init.normal_(m.weight.data, 0.1)
+                if m.bias is not None:
+                    torch.nn.init.zeros_(m.bias.data)
+            elif isinstance(m, nn.BatchNorm2d):
+                m.weight.data.fill_(1)
+                m.bias.data.zero_()
 
 
 __all__ = [
