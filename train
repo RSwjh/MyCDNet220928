@@ -1,0 +1,165 @@
+from networks import GenerateNet
+from loss import dice_bce_loss,FCCDN_loss_BCD,ComputeMIoU
+import torch
+from data_utils import LoadDatasetFromFolder,ValDatasetFromFolder
+from torch.utils.data import DataLoader
+from tqdm import tqdm
+from torch.utils.tensorboard import SummaryWriter
+import os
+class Config():
+    def __init__(self):
+        self.TRAIN_NAME='FCCDN_220915_3'
+        self.MODEL_NAME = 'FCCDN'
+        self.MODEL_OUTPUT_STRIDE = 16
+        self.BAND_NUM = 3
+        self.USE_SE = True
+        self.DATAPATH_TIME1='../CLCD/train/time1'
+        self.DATAPATH_TIME2='../CLCD/train/time2'
+        self.DATAPATH_LABEL='../CLCD/train/label'
+        self.TESTPATH_TIME1 = '../CLCD/test/time1'
+        self.TESTPATH_TIME2 = '../CLCD/test/time2'
+        self.TESTPATH_LABEL = '../CLCD/test/label'
+        self.VALPATH_TIME1 = '../CLCD/val/time1'
+        self.VALPATH_TIME2 = '../CLCD/val/time2'
+        self.VALPATH_LABEL = '../CLCD/val/label'
+        self.LOAD_PRETRAINED=False
+        self.PRETRAINED_MODEL='./pretrained/FCCDN_test_LEVIR_CD.pth'
+        self.BATCHSIZE=16
+        self.VAL_BATCHSIZE=16
+        self.NUM_WORKERS=6
+        self.LR=0.002
+        self.NUM_EPOCHS=500
+        self.SAVE_EPOCH_FREQ=10
+
+
+if __name__=='__main__':
+    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+    cfg=Config()
+    # dataset
+    dataset_train = LoadDatasetFromFolder(cfg)
+    dataset_val = ValDatasetFromFolder(cfg)
+    dataloader_train = DataLoader(dataset_train, num_workers=cfg.NUM_WORKERS, batch_size=cfg.BATCHSIZE, shuffle=True)
+    dataloader_val = DataLoader(dataset_val, num_workers=cfg.NUM_WORKERS, batch_size=cfg.VAL_BATCHSIZE, shuffle=True)
+
+    # model
+    CDNet = GenerateNet(cfg)
+    CDNet = CDNet.cuda()
+    CDNet.initialize_weights()
+    #optimizer
+    optimizer = torch.optim.AdamW(CDNet.parameters(), lr=cfg.LR, weight_decay=0.001, betas=(0.9, 0.999))
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=100)
+
+    modelname = cfg.TRAIN_NAME
+    modeldir = os.path.join('../trained/', modelname)
+
+    if cfg.LOAD_PRETRAINED:
+        CDNet.load_state_dict(torch.load(cfg.PRETRAINED_MODEL), strict=False)
+        print("Loaded model_state_dict ", cfg.PRETRAINED_MODEL)
+
+    writer = SummaryWriter(os.path.join(modeldir, './logs'))
+    F1Score = 0
+    for epoch in range(1, cfg.NUM_EPOCHS + 1):
+        train_bar = tqdm(dataloader_train)
+        running_results = {'batch_sizes': 0, 'CD_loss': 0 }
+
+        CDNet.train()
+        for img1, img2, labels in train_bar:
+            running_results['batch_sizes'] += cfg.BATCHSIZE
+            img1 = img1.to(device, dtype=torch.float)
+            img2 = img2.to(device, dtype=torch.float)
+            labels = [label.to(device, dtype=torch.float) for label in labels]
+
+            # label = torch.argmax(label, 1).unsqueeze(1).float()
+            x = [img1, img2]
+            result = CDNet(x)
+            # loss_change = criterion(result, labels[0])
+            loss = FCCDN_loss_BCD(result, labels)
+            CDNet.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+            running_results['CD_loss'] += loss.item() * cfg.BATCHSIZE
+            train_bar.set_description(
+                desc='[%d/%d] loss: %.4f' % (
+                    epoch, cfg.NUM_EPOCHS,
+                    running_results['CD_loss'] / running_results['batch_sizes'],))
+        epochLoss = running_results['CD_loss'] / running_results['batch_sizes']
+        writer.add_scalar('loss/loss', epochLoss, epoch)
+
+        # 学习率曲线
+        writer.add_scalar('loss/lr', optimizer.state_dict()['param_groups'][0]['lr'], epoch)
+        scheduler.step()
+
+        CDNet.eval()
+        with torch.no_grad():
+            val_bar = tqdm(dataloader_val)
+            valing_results = {'batch_sizes': 0, 'val_loss': 0, 'IoU': 0, 'mIoU': 0, 'F1': 0}
+            iterate = 1
+            for hr_img1, hr_img2, labels in val_bar:
+                valing_results['batch_sizes'] += cfg.VAL_BATCHSIZE
+                hr_img1 = hr_img1.to(device, dtype=torch.float)
+                hr_img2 = hr_img2.to(device, dtype=torch.float)
+                labels = [label.to(device, dtype=torch.float) for label in labels]
+
+                # label = torch.argmax(label, 1).unsqueeze(1).float()
+                x = [hr_img1, hr_img2]
+                result = CDNet(x)
+
+                valloss = FCCDN_loss_BCD(result[0], labels[0])
+                y = result[0]
+                # cd_map = torch.argmax(cd_map, 1).unsqueeze(1).float()
+                y = torch.sigmoid(y)
+                gt_value = (labels[0] > 0).float()
+                prob = (y > 0.5).float()
+                if(iterate==1):
+                    writer.add_images('groud_truth', gt_value, epoch)
+                    writer.add_images('predict', prob, epoch)
+
+                prob = prob.cpu().detach().numpy()
+                gt_value = gt_value.cpu().detach().numpy()
+
+                iou, miou, f1 = ComputeMIoU(prob, gt_value)
+                valing_results['val_loss'] += valloss.item() * cfg.VAL_BATCHSIZE
+                valing_results['IoU'] += iou * cfg.VAL_BATCHSIZE
+                valing_results['mIoU'] += miou * cfg.VAL_BATCHSIZE
+                valing_results['F1'] += f1 * cfg.VAL_BATCHSIZE
+                val_bar.set_description(
+                    desc='loss_val: %.4f , IoU: %.4f , mIoU: %.4f , F1: %.4f' %
+                         (valing_results['val_loss'] / valing_results['batch_sizes'],
+                          valing_results['IoU'] / valing_results['batch_sizes'],
+                          valing_results['mIoU'] / valing_results['batch_sizes'],
+                          valing_results['F1'] / valing_results['batch_sizes'],
+                          ))
+
+            val_miou = valing_results['mIoU'] / valing_results['batch_sizes']
+            val_iou = valing_results['IoU'] / valing_results['batch_sizes']
+            val_f1 = valing_results['F1'] / valing_results['batch_sizes']
+            val_dice_bce_loss = valing_results['val_loss'] / running_results['batch_sizes']
+            writer.add_scalar('loss/mIoU', val_miou, epoch)
+            writer.add_scalar('loss/IoU', val_iou, epoch)
+            writer.add_scalar('loss/F1', val_f1, epoch)
+            writer.add_scalar('loss/val_loss', val_dice_bce_loss, epoch)
+
+        # 保存最新的模型
+        torch.save(CDNet.state_dict(), os.path.join(modeldir, 'latest_%d.pth' % (epoch)))
+        # 按照args.save_epoch_freq来保存模型参数文件
+        if epoch % cfg.SAVE_EPOCH_FREQ == 0 or epoch == 1:
+            fName = 'FCCDN_epoch_%d.pth' % (epoch)
+            sPath = os.path.join(modeldir, fName)
+            torch.save(CDNet.state_dict(), sPath)
+        if epoch != 1:
+            os.remove(os.path.join(modeldir, 'latest_%d.pth' % (epoch - 1)))
+        if val_dice_bce_loss < mloss:
+            mloss = val_dice_bce_loss
+            torch.save(CDNet.state_dict(), os.path.join(modeldir, 'best.pth'))
+            print("Saved the best model of epoch ", str(epoch))
+        if epoch == 1:
+            F1Score = val_f1
+        if epoch%10==0:
+            if val_f1>F1Score:
+                F1Score=val_f1
+            for p in optimizer.param_groups:
+                p['lr']=p['lr']*0.3
+
+
+    writer.close()
